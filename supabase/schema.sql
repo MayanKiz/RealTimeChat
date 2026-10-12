@@ -112,8 +112,7 @@ drop policy if exists "conversation members can receive private chat events" on 
 create policy "conversation members can receive private chat events"
 on realtime.messages for select to authenticated
 using (
-  realtime.topic() like 'chat:%'
-  and public.is_conversation_member(split_part(realtime.topic(), ':', 2)::uuid)
+  case when realtime.topic() ~ '^chat:[0-9a-fA-F-]{36}
 );
 drop policy if exists "conversation members can send private chat events" on realtime.messages;
 create policy "conversation members can send private chat events"
@@ -121,6 +120,26 @@ on realtime.messages for insert to authenticated
 with check (
   realtime.topic() like 'chat:%'
   and public.is_conversation_member(split_part(realtime.topic(), ':', 2)::uuid)
+);
+
+-- In Supabase Dashboard, enable Realtime for public.messages if it is not already enabled.
+
+    then public.is_conversation_member(split_part(realtime.topic(), ':', 2)::uuid)
+    else false
+  end
+);
+drop policy if exists "conversation members can send private chat events" on realtime.messages;
+create policy "conversation members can send private chat events"
+on realtime.messages for insert to authenticated
+with check (
+  case when realtime.topic() ~ '^chat:[0-9a-fA-F-]{36}
+);
+
+-- In Supabase Dashboard, enable Realtime for public.messages if it is not already enabled.
+
+    then public.is_conversation_member(split_part(realtime.topic(), ':', 2)::uuid)
+    else false
+  end
 );
 
 -- In Supabase Dashboard, enable Realtime for public.messages if it is not already enabled.
