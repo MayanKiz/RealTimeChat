@@ -79,14 +79,14 @@ export default function ChatPage() {
           throw new Error("This device's private key does not match the account's published key. To protect old messages, the key was not replaced. Restore the original device key to continue.");
         }
         if (!remote) {
-          const { error: publishError } = await supabase.from("user_keys").upsert({ user_id: userId, public_key: localIdentity.publicKeyJwk }, { onConflict: "user_id" });
+          const { error: publishError } = await supabase.from("user_keys").insert({ user_id: userId, public_key: localIdentity.publicKeyJwk });
           if (publishError) throw publishError;
         }
       } else if (remote) {
         throw new Error("This account already has an encryption key on another device. Key recovery or a secure device-transfer flow is needed. This device will not overwrite it.");
       } else {
         current = await createLocalIdentity(userId);
-        const { error: publishError } = await supabase.from("user_keys").upsert({ user_id: userId, public_key: current.publicKeyJwk }, { onConflict: "user_id" });
+        const { error: publishError } = await supabase.from("user_keys").insert({ user_id: userId, public_key: current.publicKeyJwk });
         if (publishError) throw publishError;
       }
       if (!cancelled) { setIdentity(current); setKeyStatus("ready"); }
@@ -141,7 +141,7 @@ export default function ChatPage() {
   }, [userId, shareDraft, session, identity, roomCrypto, roomId]);
 
   useEffect(() => {
-    if (!supabase || !userId || !roomId) { setMessages([]); setLiveDrafts({}); return; }
+    if (!supabase || !userId || !roomId || keyStatus !== "ready" || !identity) { setMessages([]); setLiveDrafts({}); return; }
     let alive = true;
     setMessages([]);
     setLiveDrafts({});
