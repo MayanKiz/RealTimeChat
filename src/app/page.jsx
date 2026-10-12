@@ -152,7 +152,7 @@ export default function ChatPage() {
   }, [userId, shareDraft, session, identity, roomCrypto, roomId]);
 
   useEffect(() => {
-    if (!supabase || !userId || !roomId || keyStatus !== "ready" || !identity) { setMessages([]); setLiveDrafts({}); return; }
+    if (!supabase || !userId || !roomId || keyStatus !== "ready" || !identity || !roomCrypto || roomCrypto.roomId !== roomId) { setMessages([]); setLiveDrafts({}); return; }
     let alive = true;
     setMessages([]);
     setLiveDrafts({});
@@ -162,7 +162,7 @@ export default function ChatPage() {
       if (error) { setNotice(error.message); return; }
       const decoded = await Promise.all((data || []).map(async (row) => {
         try {
-          const body = await decryptForRecipient({ envelope: row.encrypted_payload, roomId, senderId: row.user_id, recipientId: userId, privateKey: identity.privateKey });
+          const body = await decryptForRecipient({ envelope: row.encrypted_payload, roomId, senderId: row.user_id, recipientId: userId, privateKey: identity.privateKey, expectedSenderPublicKey: roomCrypto.publicKeys[row.user_id] });
           return { ...row, body, decryptError: false };
         } catch { return { ...row, body: "Unable to decrypt this message on this device.", decryptError: true }; }
       }));
@@ -174,7 +174,7 @@ export default function ChatPage() {
       .on("broadcast", { event: "draft" }, async ({ payload }) => {
         if (!payload?.userId || payload.userId === userId || !payload.encryptedDraft || !identity) return;
         try {
-          const text = await decryptForRecipient({ envelope: payload.encryptedDraft, roomId, senderId: payload.userId, recipientId: userId, privateKey: identity.privateKey });
+          const text = await decryptForRecipient({ envelope: payload.encryptedDraft, roomId, senderId: payload.userId, recipientId: userId, privateKey: identity.privateKey, expectedSenderPublicKey: roomCrypto.publicKeys[row.user_id] });
           setLiveDrafts((current) => ({ ...current, [payload.userId]: { text, name: payload.name || "Someone", updatedAt: payload.updatedAt || Date.now() } }));
         } catch {
           setLiveDrafts((current) => { const next = { ...current }; delete next[payload.userId]; return next; });
@@ -189,7 +189,7 @@ export default function ChatPage() {
       })
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages", filter: "conversation_id=eq." + roomId }, async ({ new: row }) => {
         try {
-          const body = await decryptForRecipient({ envelope: row.encrypted_payload, roomId, senderId: row.user_id, recipientId: userId, privateKey: identity.privateKey });
+          const body = await decryptForRecipient({ envelope: row.encrypted_payload, roomId, senderId: row.user_id, recipientId: userId, privateKey: identity.privateKey, expectedSenderPublicKey: roomCrypto.publicKeys[row.user_id] });
           setMessages((current) => current.some((message) => message.id === row.id) ? current : [...current, { ...row, body }]);
         } catch {
           setMessages((current) => current.some((message) => message.id === row.id) ? current : [...current, { ...row, body: "Unable to decrypt this message on this device.", decryptError: true }]);
@@ -208,7 +208,7 @@ export default function ChatPage() {
       supabase.removeChannel(channel);
       if (channelRef.current === channel) channelRef.current = null;
     };
-  }, [supabase, userId, roomId, identity]);
+  }, [supabase, userId, roomId, identity, keyStatus, roomCrypto]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
