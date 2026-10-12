@@ -115,3 +115,9 @@ export async function decryptForRecipient({ envelope, roomId, senderId, recipien
   const plaintext = await crypto.subtle.decrypt({ name: "AES-GCM", iv, additionalData: aad, tagLength: 128 }, key, base64ToBytes(item.ciphertext));
   return new TextDecoder().decode(plaintext);
 }
+
+export async function fingerprintPublicKey(publicKeyJwk) {
+  const canonical = [publicKeyJwk?.kty, publicKeyJwk?.crv, publicKeyJwk?.x, publicKeyJwk?.y].join(":");
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("").match(/.{1,4}/g).join(" ");
+}
