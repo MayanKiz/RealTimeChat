@@ -174,7 +174,7 @@ export default function ChatPage() {
       .on("broadcast", { event: "draft" }, async ({ payload }) => {
         if (!payload?.userId || payload.userId === userId || !payload.encryptedDraft || !identity) return;
         try {
-          const text = await decryptForRecipient({ envelope: payload.encryptedDraft, roomId, senderId: payload.userId, recipientId: userId, privateKey: identity.privateKey, expectedSenderPublicKey: roomCrypto.publicKeys[row.user_id] });
+          const text = await decryptForRecipient({ envelope: payload.encryptedDraft, roomId, senderId: payload.userId, recipientId: userId, privateKey: identity.privateKey, expectedSenderPublicKey: roomCrypto.publicKeys[payload.userId] });
           setLiveDrafts((current) => ({ ...current, [payload.userId]: { text, name: payload.name || "Someone", updatedAt: payload.updatedAt || Date.now() } }));
         } catch {
           setLiveDrafts((current) => { const next = { ...current }; delete next[payload.userId]; return next; });
