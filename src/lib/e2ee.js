@@ -13,7 +13,7 @@ function openKeyDb() {
   });
 }
 
-async function readPrivateJwk(userId) {
+async function readIdentity(userId) {
   const db = await openKeyDb();
   return new Promise((resolve, reject) => {
     const request = db.transaction(STORE_NAME, "readonly").objectStore(STORE_NAME).get(userId + ":" + KEY_ID);
@@ -22,11 +22,11 @@ async function readPrivateJwk(userId) {
   });
 }
 
-async function savePrivateJwk(userId, jwk) {
+async function saveIdentity(userId, identity) {
   const db = await openKeyDb();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_NAME, "readwrite");
-    tx.objectStore(STORE_NAME).put(jwk, userId + ":" + KEY_ID);
+    tx.objectStore(STORE_NAME).put(identity, userId + ":" + KEY_ID);
     tx.oncomplete = () => { db.close(); resolve(); };
     tx.onerror = () => { db.close(); reject(tx.error); };
   });
@@ -34,20 +34,29 @@ async function savePrivateJwk(userId, jwk) {
 
 export async function loadLocalIdentity(userId) {
   if (!globalThis.crypto?.subtle || !globalThis.indexedDB) throw new Error("This browser does not support secure local key storage. Use a current browser over HTTPS.");
-  const privateJwk = await readPrivateJwk(userId);
-  if (!privateJwk) return null;
-  const privateKey = await crypto.subtle.importKey("jwk", privateJwk, { name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
-  const publicKeyJwk = { kty: privateJwk.kty, crv: privateJwk.crv, x: privateJwk.x, y: privateJwk.y, ext: true, key_ops: [] };
-  return { privateKey, publicKeyJwk };
+  const stored = await readIdentity(userId);
+  if (!stored) return null;
+  // New identities keep a non-extractable CryptoKey in IndexedDB. This fallback
+  // supports a key created by the first development version of this feature.
+  if (stored.privateKey && stored.publicKeyJwk) return stored;
+  if (stored.kty && stored.d) {
+    const privateKey = await crypto.subtle.importKey("jwk", stored, { name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
+    const publicKeyJwk = { kty: stored.kty, crv: stored.crv, x: stored.x, y: stored.y, ext: true, key_ops: [] };
+    const identity = { privateKey, publicKeyJwk };
+    await saveIdentity(userId, identity);
+    return identity;
+  }
+  throw new Error("The local encryption key could not be read.");
 }
 
 export async function createLocalIdentity(userId) {
   if (!globalThis.crypto?.subtle || !globalThis.indexedDB) throw new Error("This browser does not support secure local key storage. Use a current browser over HTTPS.");
-  const pair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
-  const privateJwk = await crypto.subtle.exportKey("jwk", pair.privateKey);
+  // Private CryptoKey is non-extractable and persisted locally using IndexedDB structured cloning.
+  const pair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
   const publicKeyJwk = await crypto.subtle.exportKey("jwk", pair.publicKey);
-  await savePrivateJwk(userId, privateJwk);
-  return { privateKey: pair.privateKey, publicKeyJwk };
+  const identity = { privateKey: pair.privateKey, publicKeyJwk };
+  await saveIdentity(userId, identity);
+  return identity;
 }
 
 function bytesToBase64(bytes) {
