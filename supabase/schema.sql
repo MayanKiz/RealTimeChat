@@ -25,6 +25,19 @@ create table if not exists public.messages (
 );
 create index if not exists messages_room_created_idx on public.messages(conversation_id, created_at);
 
+-- Compatibility for a database that ran the earlier plaintext-message schema.
+alter table public.messages add column if not exists encrypted_payload jsonb;
+do $
+begin
+  if exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'messages' and column_name = 'body'
+  ) then
+    execute 'alter table public.messages alter column body drop not null';
+  end if;
+end
+$;
+
 -- Public ECDH identity keys. Private keys stay on each user's device in IndexedDB.
 create table if not exists public.user_keys (
   user_id uuid primary key references auth.users(id) on delete cascade,
@@ -87,8 +100,6 @@ create policy "users can publish own public key" on public.user_keys
 for insert to authenticated with check (user_id = auth.uid());
 
 drop policy if exists "users can update own public key" on public.user_keys;
-create policy "users can update own public key" on public.user_keys
-for update to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
 
 create or replace function public.create_conversation(p_title text)
 returns uuid language plpgsql security definer set search_path = ''
@@ -125,7 +136,7 @@ grant execute on function public.create_conversation(text) to authenticated;
 grant execute on function public.join_conversation(uuid) to authenticated;
 grant select on public.conversations, public.conversation_members, public.messages, public.user_keys to authenticated;
 grant insert on public.messages to authenticated;
-grant insert, update on public.user_keys to authenticated;
+grant insert on public.user_keys to authenticated;
 
 -- Private Realtime Broadcast topics use chat:<conversation UUID>.
 alter table realtime.messages enable row level security;
