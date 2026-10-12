@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getSupabase } from "../lib/supabase";
-import { createLocalIdentity, decryptForRecipient, encryptForRecipients, loadLocalIdentity } from "../lib/e2ee";
+import { createLocalIdentity, decryptForRecipient, encryptForRecipients, fingerprintPublicKey, loadLocalIdentity } from "../lib/e2ee";
 import { ArrowDownLeft, ArrowUpRight, Check, Copy, LogOut, MessageCircle, Plus, Send, ShieldCheck, Sparkles, Users, X } from "lucide-react";
 
 const shortId = (value = "") => value.length > 15 ? value.slice(0, 8) + "…" + value.slice(-5) : value;
@@ -28,6 +28,8 @@ export default function ChatPage() {
   const [identity, setIdentity] = useState(null);
   const [keyStatus, setKeyStatus] = useState("loading");
   const [roomCrypto, setRoomCrypto] = useState(null);
+  const [showKeyInfo, setShowKeyInfo] = useState(false);
+  const [fingerprints, setFingerprints] = useState({});
   const bottomRef = useRef(null);
   const channelRef = useRef(null);
   const draftTimer = useRef(null);
@@ -119,6 +121,15 @@ export default function ChatPage() {
     });
     return () => { cancelled = true; };
   }, [supabase, userId, roomId, identity, keyStatus]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!roomCrypto) { setFingerprints({}); return; }
+    Promise.all(Object.entries(roomCrypto.publicKeys).map(async ([id, key]) => [id, await fingerprintPublicKey(key)]))
+      .then((entries) => { if (!cancelled) setFingerprints(Object.fromEntries(entries)); })
+      .catch(() => { if (!cancelled) setFingerprints({}); });
+    return () => { cancelled = true; };
+  }, [roomCrypto]);
 
   const broadcastDraft = useCallback(async (text) => {
     const channel = channelRef.current;
@@ -302,7 +313,8 @@ export default function ChatPage() {
         <div className="profile-row"><div className="profile-avatar">{(session.user.email||"U").slice(0,1).toUpperCase()}</div><div className="profile-copy"><strong>{session.user.email}</strong><small>Authenticated session</small></div></div>
       </aside>
       <section className="conversation glass-panel">
-        <header className="conversation-head"><div className="room-avatar large"><Users size={18}/></div><div className="conversation-title"><h2>{rooms.find((r)=>r.id===roomId)?.title || "Choose a conversation"}</h2><p><span className="online-dot"/> <ShieldCheck size={12}/> {keyStatus === "ready" && roomCrypto?.roomId === roomId ? "End-to-end encrypted" : keyStatus === "error" ? "Encryption needs attention" : "Preparing encryption keys"}</p></div><div className="head-actions"><button className={"share-toggle " + (shareDraft ? "enabled" : "")} onClick={()=>{setShareDraft((value)=>!value); if(shareDraft) broadcastDraft("");}} title="Toggle sharing live draft text"><span className="toggle-dot"/>{shareDraft ? "Live text on" : "Live text off"}</button><button className="icon-button" title="Copy invite ID" disabled={!roomId} onClick={()=>{navigator.clipboard?.writeText(roomId);setCopyDone(true);setTimeout(()=>setCopyDone(false),1400);}}>{copyDone?<Check size={16}/>:<Copy size={16}/>}</button></div></header>
+        <header className="conversation-head"><div className="room-avatar large"><Users size={18}/></div><div className="conversation-title"><h2>{rooms.find((r)=>r.id===roomId)?.title || "Choose a conversation"}</h2><p><span className="online-dot"/> <ShieldCheck size={12}/> {keyStatus === "ready" && roomCrypto?.roomId === roomId ? "End-to-end encrypted" : keyStatus === "error" ? "Encryption needs attention" : "Preparing encryption keys"}</p></div><div className="head-actions"><button className={"share-toggle " + (shareDraft ? "enabled" : "")} onClick={()=>{setShareDraft((value)=>!value); if(shareDraft) broadcastDraft("");}} title="Toggle sharing live draft text"><span className="toggle-dot"/>{shareDraft ? "Live text on" : "Live text off"}</button><button className="icon-button" title="Encryption key fingerprints" disabled={!roomId || keyStatus!=="ready" || roomCrypto?.roomId!==roomId} onClick={()=>setShowKeyInfo((value)=>!value)}><ShieldCheck size={16}/></button><button className="icon-button" title="Copy invite ID" disabled={!roomId} onClick={()=>{navigator.clipboard?.writeText(roomId);setCopyDone(true);setTimeout(()=>setCopyDone(false),1400);}}>{copyDone?<Check size={16}/>:<Copy size={16}/>}</button></div></header>
+        {showKeyInfo && roomCrypto?.roomId===roomId && <div className="key-info-panel"><div className="key-info-title"><ShieldCheck size={16}/> End-to-end encryption keys</div><p>Compare each fingerprint with that participant through a separate trusted channel. This helps detect a substituted public key.</p>{Object.entries(fingerprints).map(([id, fingerprint])=><div className="fingerprint-row" key={id}><strong>{id===userId?"You":shortId(id)}</strong><code>{fingerprint || "Calculating fingerprint…"}</code></div>)}</div>}
         <div className="message-feed">
           {!roomId ? <div className="welcome-state"><div className="welcome-orb"><Sparkles size={24}/></div><h3>A room for your words.</h3><p>Create a room or join one using an invite ID. Share the ID only with the person you want in the conversation.</p></div> : !messages.length && !Object.keys(liveDrafts).length ? <div className="welcome-state"><div className="welcome-orb"><MessageCircle size={24}/></div><h3>Start something real.</h3><p>Messages are saved. Draft previews are temporary and appear only while the other person is writing.</p></div> : null}
           {messages.map((message)=><div key={message.id} className={"message-row " + (message.user_id===userId?"mine":"theirs")}><div className={"message-bubble " + (message.decryptError ? "decrypt-error" : "")}><p>{message.body}</p><span><ShieldCheck size={11}/> {message.user_id===userId?"You":shortId(message.user_id)} · {time(message.created_at)}</span></div></div>)}
