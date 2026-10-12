@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getSupabase } from "../lib/supabase";
+import { createLocalIdentity, decryptForRecipient, encryptForRecipients, loadLocalIdentity } from "../lib/e2ee";
 import { ArrowDownLeft, ArrowUpRight, Check, Copy, LogOut, MessageCircle, Plus, Send, ShieldCheck, Sparkles, Users, X } from "lucide-react";
 
 const shortId = (value = "") => value.length > 15 ? value.slice(0, 8) + "…" + value.slice(-5) : value;
@@ -24,6 +25,9 @@ export default function ChatPage() {
   const [shareDraft, setShareDraft] = useState(true);
   const [busy, setBusy] = useState(false);
   const [copyDone, setCopyDone] = useState(false);
+  const [identity, setIdentity] = useState(null);
+  const [keyStatus, setKeyStatus] = useState("loading");
+  const [roomCrypto, setRoomCrypto] = useState(null);
   const bottomRef = useRef(null);
   const channelRef = useRef(null);
   const draftTimer = useRef(null);
@@ -61,19 +65,80 @@ export default function ChatPage() {
   useEffect(() => { roomIdRef.current = roomId; }, [roomId]);
 
   useEffect(() => {
+    if (!supabase || !userId) { setIdentity(null); setKeyStatus("loading"); return; }
+    let cancelled = false;
+    setIdentity(null);
+    setKeyStatus("loading");
+    (async () => {
+      const localIdentity = await loadLocalIdentity(userId);
+      const { data: remote, error } = await supabase.from("user_keys").select("public_key").eq("user_id", userId).maybeSingle();
+      if (error) throw error;
+      let current = localIdentity;
+      if (localIdentity) {
+        if (remote && (remote.public_key?.x !== localIdentity.publicKeyJwk.x || remote.public_key?.y !== localIdentity.publicKeyJwk.y)) {
+          throw new Error("This device's private key does not match the account's published key. To protect old messages, the key was not replaced. Restore the original device key to continue.");
+        }
+        if (!remote) {
+          const { error: publishError } = await supabase.from("user_keys").upsert({ user_id: userId, public_key: localIdentity.publicKeyJwk }, { onConflict: "user_id" });
+          if (publishError) throw publishError;
+        }
+      } else if (remote) {
+        throw new Error("This account already has an encryption key on another device. Key recovery or a secure device-transfer flow is needed. This device will not overwrite it.");
+      } else {
+        current = await createLocalIdentity(userId);
+        const { error: publishError } = await supabase.from("user_keys").upsert({ user_id: userId, public_key: current.publicKeyJwk }, { onConflict: "user_id" });
+        if (publishError) throw publishError;
+      }
+      if (!cancelled) { setIdentity(current); setKeyStatus("ready"); }
+    })().catch((error) => {
+      if (!cancelled) { setKeyStatus("error"); setNotice("Encryption setup failed: " + (error?.message || "Unknown error")); }
+    });
+    return () => { cancelled = true; };
+  }, [supabase, userId]);
+
+  useEffect(() => {
     if (!supabase || !userId) return;
     loadRooms(userId);
   }, [supabase, userId, loadRooms]);
 
-  const broadcastDraft = useCallback((text) => {
+  useEffect(() => {
+    if (!supabase || !userId || !roomId || keyStatus !== "ready" || !identity) { setRoomCrypto(null); return; }
+    let cancelled = false;
+    (async () => {
+      const { data: members, error: memberError } = await supabase.from("conversation_members").select("user_id").eq("conversation_id", roomId);
+      if (memberError) throw memberError;
+      const memberIds = [...new Set((members || []).map((row) => row.user_id))];
+      if (!memberIds.includes(userId)) throw new Error("You are not a member of this conversation.");
+      const { data: keys, error: keysError } = await supabase.from("user_keys").select("user_id, public_key").in("user_id", memberIds);
+      if (keysError) throw keysError;
+      const publicKeys = Object.fromEntries((keys || []).map((row) => [row.user_id, row.public_key]));
+      if (memberIds.some((id) => !publicKeys[id])) throw new Error("A participant has not set up an encryption key yet. Ask them to sign in and open the chat.");
+      if (!cancelled) setRoomCrypto({ roomId, memberIds, publicKeys });
+    })().catch((error) => {
+      if (!cancelled) { setRoomCrypto(null); setNotice("Conversation encryption unavailable: " + (error?.message || "Unknown error")); }
+    });
+    return () => { cancelled = true; };
+  }, [supabase, userId, roomId, identity, keyStatus]);
+
+  const broadcastDraft = useCallback(async (text) => {
     const channel = channelRef.current;
     if (!channel || !userId) return;
-    if (!shareDraft) {
-      channel.send({ type: "broadcast", event: "draft", payload: { userId, text: "", name: session?.user?.email?.split("@")[0] || "Someone", shared: false, updatedAt: Date.now() } });
+    if (!shareDraft || !text.trim()) {
+      channel.send({ type: "broadcast", event: "draft-clear", payload: { userId } });
+      channel.send({ type: "broadcast", event: "typing", payload: { userId, active: false } });
       return;
     }
-    channel.send({ type: "broadcast", event: "draft", payload: { userId, text, name: session?.user?.email?.split("@")[0] || "Someone", shared: true, updatedAt: Date.now() } });
-  }, [userId, shareDraft, session]);
+    if (!identity || !roomCrypto || roomCrypto.roomId !== roomId) return;
+    try {
+      const encryptedDraft = await encryptForRecipients({
+        text, roomId, senderId: userId, recipientIds: roomCrypto.memberIds,
+        privateKey: identity.privateKey, publicKeyJwk: identity.publicKeyJwk, publicKeys: roomCrypto.publicKeys,
+      });
+      if (channelRef.current !== channel) return;
+      channel.send({ type: "broadcast", event: "draft", payload: { userId, encryptedDraft, name: session?.user?.email?.split("@")[0] || "Someone", updatedAt: Date.now() } });
+      channel.send({ type: "broadcast", event: "typing", payload: { userId, name: session?.user?.email?.split("@")[0] || "Someone", active: true } });
+    } catch (error) { setNotice("Could not encrypt live draft: " + (error?.message || "Unknown error")); }
+  }, [userId, shareDraft, session, identity, roomCrypto, roomId]);
 
   useEffect(() => {
     if (!supabase || !userId || !roomId) { setMessages([]); setLiveDrafts({}); return; }
@@ -81,22 +146,28 @@ export default function ChatPage() {
     setMessages([]);
     setLiveDrafts({});
     const loadMessages = async () => {
-      const { data, error } = await supabase.from("messages").select("id, conversation_id, user_id, body, created_at").eq("conversation_id", roomId).order("created_at", { ascending: true }).limit(300);
+      const { data, error } = await supabase.from("messages").select("id, conversation_id, user_id, encrypted_payload, created_at").eq("conversation_id", roomId).order("created_at", { ascending: true }).limit(300);
       if (!alive) return;
-      if (error) setNotice(error.message);
-      else setMessages(data || []);
+      if (error) { setNotice(error.message); return; }
+      const decoded = await Promise.all((data || []).map(async (row) => {
+        try {
+          const body = await decryptForRecipient({ envelope: row.encrypted_payload, roomId, senderId: row.user_id, recipientId: userId, privateKey: identity.privateKey });
+          return { ...row, body, decryptError: false };
+        } catch { return { ...row, body: "Unable to decrypt this message on this device.", decryptError: true }; }
+      }));
+      if (alive) setMessages(decoded);
     };
     loadMessages();
     const channel = supabase.channel("chat:" + roomId, { config: { private: true, broadcast: { self: false, ack: true }, presence: { key: userId } } });
     channel
-      .on("broadcast", { event: "draft" }, ({ payload }) => {
-        if (!payload?.userId || payload.userId === userId) return;
-        setLiveDrafts((current) => {
-          const next = { ...current };
-          if (!payload.text || !payload.shared) delete next[payload.userId];
-          else next[payload.userId] = { text: payload.text, name: payload.name || "Someone", updatedAt: payload.updatedAt || Date.now() };
-          return next;
-        });
+      .on("broadcast", { event: "draft" }, async ({ payload }) => {
+        if (!payload?.userId || payload.userId === userId || !payload.encryptedDraft || !identity) return;
+        try {
+          const text = await decryptForRecipient({ envelope: payload.encryptedDraft, roomId, senderId: payload.userId, recipientId: userId, privateKey: identity.privateKey });
+          setLiveDrafts((current) => ({ ...current, [payload.userId]: { text, name: payload.name || "Someone", updatedAt: payload.updatedAt || Date.now() } }));
+        } catch {
+          setLiveDrafts((current) => { const next = { ...current }; delete next[payload.userId]; return next; });
+        }
       })
       .on("broadcast", { event: "draft-clear" }, ({ payload }) => {
         if (payload?.userId) setLiveDrafts((current) => { const next = { ...current }; delete next[payload.userId]; return next; });
@@ -105,8 +176,13 @@ export default function ChatPage() {
         if (!payload?.userId || payload.userId === userId) return;
         setTypingUsers((current) => ({ ...current, [payload.userId]: { name: payload.name || "Someone", active: !!payload.active, at: Date.now() } }));
       })
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages", filter: "conversation_id=eq." + roomId }, ({ new: row }) => {
-        setMessages((current) => current.some((message) => message.id === row.id) ? current : [...current, row]);
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages", filter: "conversation_id=eq." + roomId }, async ({ new: row }) => {
+        try {
+          const body = await decryptForRecipient({ envelope: row.encrypted_payload, roomId, senderId: row.user_id, recipientId: userId, privateKey: identity.privateKey });
+          setMessages((current) => current.some((message) => message.id === row.id) ? current : [...current, { ...row, body }]);
+        } catch {
+          setMessages((current) => current.some((message) => message.id === row.id) ? current : [...current, { ...row, body: "Unable to decrypt this message on this device.", decryptError: true }]);
+        }
         setLiveDrafts((current) => { const next = { ...current }; delete next[row.user_id]; return next; });
       })
       .subscribe((status) => {
@@ -121,7 +197,7 @@ export default function ChatPage() {
       supabase.removeChannel(channel);
       if (channelRef.current === channel) channelRef.current = null;
     };
-  }, [supabase, userId, roomId]);
+  }, [supabase, userId, roomId, identity]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -143,11 +219,8 @@ export default function ChatPage() {
     draftTimer.current = setTimeout(() => {
       if (value.trim()) {
         broadcastDraft(value);
-        channelRef.current?.send({ type: "broadcast", event: "typing", payload: { userId, name: session?.user?.email?.split("@")[0] || "You", active: true } });
       } else {
         broadcastDraft("");
-        channelRef.current?.send({ type: "broadcast", event: "draft-clear", payload: { userId } });
-        channelRef.current?.send({ type: "broadcast", event: "typing", payload: { userId, active: false } });
       }
     }, 75);
   };
@@ -156,15 +229,26 @@ export default function ChatPage() {
     event.preventDefault();
     const body = draft.trim();
     if (!body || !supabase || !roomId || busy) return;
+    if (keyStatus !== "ready" || !identity || !roomCrypto || roomCrypto.roomId !== roomId) {
+      setNotice("End-to-end encryption is not ready for this conversation yet.");
+      return;
+    }
     setBusy(true);
-    const { data, error } = await supabase.from("messages").insert({ conversation_id: roomId, user_id: userId, body }).select("id, conversation_id, user_id, body, created_at").single();
-    setBusy(false);
-    if (error) { setNotice(error.message); return; }
-    setMessages((current) => current.some((item) => item.id === data.id) ? current : [...current, data]);
-    setDraft("");
-    broadcastDraft("");
-    channelRef.current?.send({ type: "broadcast", event: "draft-clear", payload: { userId } });
-    channelRef.current?.send({ type: "broadcast", event: "typing", payload: { userId, active: false } });
+    try {
+      const encrypted_payload = await encryptForRecipients({
+        text: body, roomId, senderId: userId, recipientIds: roomCrypto.memberIds,
+        privateKey: identity.privateKey, publicKeyJwk: identity.publicKeyJwk, publicKeys: roomCrypto.publicKeys,
+      });
+      const { data, error } = await supabase.from("messages").insert({ conversation_id: roomId, user_id: userId, encrypted_payload }).select("id, conversation_id, user_id, encrypted_payload, created_at").single();
+      if (error) throw error;
+      setMessages((current) => current.some((item) => item.id === data.id) ? current : [...current, { ...data, body }]);
+      setDraft("");
+      await broadcastDraft("");
+      channelRef.current?.send({ type: "broadcast", event: "draft-clear", payload: { userId } });
+      channelRef.current?.send({ type: "broadcast", event: "typing", payload: { userId, active: false } });
+    } catch (error) {
+      setNotice("Message was not sent: " + (error?.message || "Encryption or database error"));
+    } finally { setBusy(false); }
   };
 
   const signIn = async (event) => {
@@ -218,16 +302,16 @@ export default function ChatPage() {
         <div className="profile-row"><div className="profile-avatar">{(session.user.email||"U").slice(0,1).toUpperCase()}</div><div className="profile-copy"><strong>{session.user.email}</strong><small>Authenticated session</small></div></div>
       </aside>
       <section className="conversation glass-panel">
-        <header className="conversation-head"><div className="room-avatar large"><Users size={18}/></div><div className="conversation-title"><h2>{rooms.find((r)=>r.id===roomId)?.title || "Choose a conversation"}</h2><p><span className="online-dot"/> Private room · live drafts optional</p></div><div className="head-actions"><button className={"share-toggle " + (shareDraft ? "enabled" : "")} onClick={()=>{setShareDraft((value)=>!value); if(shareDraft) broadcastDraft("");}} title="Toggle sharing live draft text"><span className="toggle-dot"/>{shareDraft ? "Live text on" : "Live text off"}</button><button className="icon-button" title="Copy invite ID" disabled={!roomId} onClick={()=>{navigator.clipboard?.writeText(roomId);setCopyDone(true);setTimeout(()=>setCopyDone(false),1400);}}>{copyDone?<Check size={16}/>:<Copy size={16}/>}</button></div></header>
+        <header className="conversation-head"><div className="room-avatar large"><Users size={18}/></div><div className="conversation-title"><h2>{rooms.find((r)=>r.id===roomId)?.title || "Choose a conversation"}</h2><p><span className="online-dot"/> <ShieldCheck size={12}/> {keyStatus === "ready" && roomCrypto?.roomId === roomId ? "End-to-end encrypted" : keyStatus === "error" ? "Encryption needs attention" : "Preparing encryption keys"}</p></div><div className="head-actions"><button className={"share-toggle " + (shareDraft ? "enabled" : "")} onClick={()=>{setShareDraft((value)=>!value); if(shareDraft) broadcastDraft("");}} title="Toggle sharing live draft text"><span className="toggle-dot"/>{shareDraft ? "Live text on" : "Live text off"}</button><button className="icon-button" title="Copy invite ID" disabled={!roomId} onClick={()=>{navigator.clipboard?.writeText(roomId);setCopyDone(true);setTimeout(()=>setCopyDone(false),1400);}}>{copyDone?<Check size={16}/>:<Copy size={16}/>}</button></div></header>
         <div className="message-feed">
           {!roomId ? <div className="welcome-state"><div className="welcome-orb"><Sparkles size={24}/></div><h3>A room for your words.</h3><p>Create a room or join one using an invite ID. Share the ID only with the person you want in the conversation.</p></div> : !messages.length && !Object.keys(liveDrafts).length ? <div className="welcome-state"><div className="welcome-orb"><MessageCircle size={24}/></div><h3>Start something real.</h3><p>Messages are saved. Draft previews are temporary and appear only while the other person is writing.</p></div> : null}
-          {messages.map((message)=><div key={message.id} className={"message-row " + (message.user_id===userId?"mine":"theirs")}><div className="message-bubble"><p>{message.body}</p><span>{message.user_id===userId?"You":shortId(message.user_id)} · {time(message.created_at)}</span></div></div>)}
+          {messages.map((message)=><div key={message.id} className={"message-row " + (message.user_id===userId?"mine":"theirs")}><div className={"message-bubble " + (message.decryptError ? "decrypt-error" : "")}><p>{message.body}</p><span><ShieldCheck size={11}/> {message.user_id===userId?"You":shortId(message.user_id)} · {time(message.created_at)}</span></div></div>)}
           {Object.entries(liveDrafts).map(([id, item])=><div key={"draft-"+id} className="message-row theirs"><div className="live-draft-bubble"><div className="draft-label"><span className="typing-dots"><i/><i/><i/></span>{item.name} is writing <span className="live-pill">LIVE DRAFT</span></div><p>{item.text}</p></div></div>)}
           {Object.entries(typingUsers).filter(([id, item]) => item.active && !liveDrafts[id]).map(([id, item])=><div key={"typing-"+id} className="message-row theirs"><div className="typing-indicator"><span className="typing-dots"><i/><i/><i/></span>{item.name} is typing…</div></div>)}
           <div ref={bottomRef}/>
         </div>
         {notice && <div className="notice-bar" role="status">{notice}<button onClick={()=>setNotice("")} aria-label="Dismiss"><X size={14}/></button></div>}
-        <form className="composer" onSubmit={sendMessage}><div className="composer-inner"><textarea aria-label="Write a message" placeholder={roomId ? "Write something… they'll see it live if sharing is on" : "Choose a room first"} value={draft} onChange={(e)=>sendDraftUpdate(e.target.value)} disabled={!roomId} rows={1} maxLength={4000} onKeyDown={(e)=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendMessage(e);}}}/><button className="send-button" type="submit" disabled={!draft.trim()||busy||!roomId} aria-label="Send message"><Send size={17}/></button></div><div className="composer-footer"><span>{shareDraft?"Live draft sharing is enabled":"Only your sent messages are shared"} · Enter to send · Shift+Enter for newline</span><span>{draft.length}/4000</span></div></form>
+        <form className="composer" onSubmit={sendMessage}><div className="composer-inner"><textarea aria-label="Write a message" placeholder={roomId ? "Write something… they'll see it live if sharing is on" : "Choose a room first"} value={draft} onChange={(e)=>sendDraftUpdate(e.target.value)} disabled={!roomId} rows={1} maxLength={4000} onKeyDown={(e)=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendMessage(e);}}}/><button className="send-button" type="submit" disabled={!draft.trim()||busy||!roomId||keyStatus!=="ready"||roomCrypto?.roomId!==roomId} aria-label="Send message"><Send size={17}/></button></div><div className="composer-footer"><span>{shareDraft?"Live draft sharing is enabled":"Only your sent messages are shared"} · Enter to send · Shift+Enter for newline</span><span>{draft.length}/4000</span></div></form>
       </section>
     </div>
   </main>;
