@@ -32,22 +32,22 @@ async function savePrivateJwk(userId, jwk) {
   });
 }
 
-export async function loadOrCreateIdentity(userId) {
+export async function loadLocalIdentity(userId) {
   if (!globalThis.crypto?.subtle || !globalThis.indexedDB) throw new Error("This browser does not support secure local key storage. Use a current browser over HTTPS.");
-  let privateJwk = await readPrivateJwk(userId);
-  let privateKey;
-  let publicKeyJwk;
-  if (privateJwk) {
-    privateKey = await crypto.subtle.importKey("jwk", privateJwk, { name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
-    publicKeyJwk = { kty: privateJwk.kty, crv: privateJwk.crv, x: privateJwk.x, y: privateJwk.y, ext: true, key_ops: [] };
-  } else {
-    const pair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
-    privateJwk = await crypto.subtle.exportKey("jwk", pair.privateKey);
-    publicKeyJwk = await crypto.subtle.exportKey("jwk", pair.publicKey);
-    await savePrivateJwk(userId, privateJwk);
-    privateKey = pair.privateKey;
-  }
+  const privateJwk = await readPrivateJwk(userId);
+  if (!privateJwk) return null;
+  const privateKey = await crypto.subtle.importKey("jwk", privateJwk, { name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const publicKeyJwk = { kty: privateJwk.kty, crv: privateJwk.crv, x: privateJwk.x, y: privateJwk.y, ext: true, key_ops: [] };
   return { privateKey, publicKeyJwk };
+}
+
+export async function createLocalIdentity(userId) {
+  if (!globalThis.crypto?.subtle || !globalThis.indexedDB) throw new Error("This browser does not support secure local key storage. Use a current browser over HTTPS.");
+  const pair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const privateJwk = await crypto.subtle.exportKey("jwk", pair.privateKey);
+  const publicKeyJwk = await crypto.subtle.exportKey("jwk", pair.publicKey);
+  await savePrivateJwk(userId, privateJwk);
+  return { privateKey: pair.privateKey, publicKeyJwk };
 }
 
 function bytesToBase64(bytes) {
