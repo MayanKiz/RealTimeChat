@@ -27,7 +27,7 @@ create index if not exists messages_room_created_idx on public.messages(conversa
 
 -- Compatibility for a database that ran the earlier plaintext-message schema.
 alter table public.messages add column if not exists encrypted_payload jsonb;
-do $
+do $migration$
 begin
   if exists (
     select 1 from information_schema.columns
@@ -36,7 +36,7 @@ begin
     execute 'alter table public.messages alter column body drop not null';
   end if;
 end
-$;
+$migration$;
 
 -- Public ECDH identity keys. Private keys stay on each user's device in IndexedDB.
 create table if not exists public.user_keys (
@@ -160,7 +160,7 @@ with check (
 );
 
 -- Add the messages table to Supabase Realtime publication if it is not already present.
-do $
+do $publication$
 begin
   if not exists (
     select 1 from pg_publication_tables
@@ -171,4 +171,4 @@ begin
 exception when undefined_object then
   raise notice 'supabase_realtime publication is unavailable; enable messages Realtime in the Supabase dashboard.';
 end
-$;
+$publication$;
