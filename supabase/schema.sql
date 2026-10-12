@@ -61,6 +61,7 @@ $$;
 revoke all on function public.is_conversation_member(uuid) from public;
 grant execute on function public.is_conversation_member(uuid) to authenticated;
 
+drop policy if exists "users can read shared participants public keys" on public.user_keys;
 drop function if exists public.shares_conversation_with(uuid);
 
 drop policy if exists "members can view their conversations" on public.conversations;
@@ -157,4 +158,16 @@ with check (
   end
 );
 
--- In Supabase Dashboard, enable Realtime for public.messages if needed.
+-- Add the messages table to Supabase Realtime publication if it is not already present.
+do $
+begin
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'messages'
+  ) then
+    alter publication supabase_realtime add table public.messages;
+  end if;
+exception when undefined_object then
+  raise notice 'supabase_realtime publication is unavailable; enable messages Realtime in the Supabase dashboard.';
+end
+$;
