@@ -103,9 +103,16 @@ export async function encryptForRecipients({ text, roomId, senderId, recipientId
   return { version: 1, algorithm: "ECDH-P256/HKDF-SHA256/AES-256-GCM", senderPublicKey: publicKeyJwk, recipients };
 }
 
-export async function decryptForRecipient({ envelope, roomId, senderId, recipientId, privateKey }) {
+export async function decryptForRecipient({ envelope, roomId, senderId, recipientId, privateKey, expectedSenderPublicKey }) {
   if (!envelope || envelope.version !== 1 || !envelope.recipients?.[recipientId] || !envelope.senderPublicKey) {
     throw new Error("This message has no usable encrypted payload for this account.");
+  }
+  if (!expectedSenderPublicKey ||
+      envelope.senderPublicKey.kty !== expectedSenderPublicKey.kty ||
+      envelope.senderPublicKey.crv !== expectedSenderPublicKey.crv ||
+      envelope.senderPublicKey.x !== expectedSenderPublicKey.x ||
+      envelope.senderPublicKey.y !== expectedSenderPublicKey.y) {
+    throw new Error("The message's sender key does not match the published identity key.");
   }
   const item = envelope.recipients[recipientId];
   const salt = base64ToBytes(item.salt);
