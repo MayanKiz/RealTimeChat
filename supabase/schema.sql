@@ -61,17 +61,7 @@ $$;
 revoke all on function public.is_conversation_member(uuid) from public;
 grant execute on function public.is_conversation_member(uuid) to authenticated;
 
-create or replace function public.shares_conversation_with(p_user_id uuid)
-returns boolean language sql stable security definer set search_path = ''
-as $$
-  select exists (
-    select 1 from public.conversation_members mine
-    join public.conversation_members theirs on theirs.conversation_id = mine.conversation_id
-    where mine.user_id = auth.uid() and theirs.user_id = p_user_id
-  );
-$$;
-revoke all on function public.shares_conversation_with(uuid) from public;
-grant execute on function public.shares_conversation_with(uuid) to authenticated;
+drop function if exists public.shares_conversation_with(uuid);
 
 drop policy if exists "members can view their conversations" on public.conversations;
 create policy "members can view their conversations" on public.conversations
@@ -93,7 +83,13 @@ for insert to authenticated with check (
 
 drop policy if exists "users can read shared participants public keys" on public.user_keys;
 create policy "users can read shared participants public keys" on public.user_keys
-for select to authenticated using (public.shares_conversation_with(user_id));
+for select to authenticated using (
+  user_id = auth.uid() or exists (
+    select 1 from public.conversation_members mine
+    join public.conversation_members peer on peer.conversation_id = mine.conversation_id
+    where mine.user_id = auth.uid() and peer.user_id = user_keys.user_id
+  )
+);
 
 drop policy if exists "users can publish own public key" on public.user_keys;
 create policy "users can publish own public key" on public.user_keys
