@@ -1,62 +1,30 @@
 # RealTimeChat
 
-A Next.js chat app using Supabase with NAAZZ-V2-inspired dark styling and browser-side end-to-end encryption (E2EE).
+A Next.js encrypted chat application for Vercel. Supabase has been removed. The app uses Neon PostgreSQL, Vercel Blob for encrypted attachments, signed HTTP-only sessions, and browser-side E2EE.
 
-## Security design
+## Deploy from Android / Vercel dashboard
 
-- **Saved messages:** plaintext is encrypted in the browser before insert. Supabase stores an encrypted JSON envelope in `messages.encrypted_payload`, not a plaintext message body.
-- **Cryptography:** ECDH P-256 key agreement, HKDF-SHA-256 key derivation, and AES-256-GCM authenticated encryption with a fresh random salt and IV for each recipient envelope.
-- **Private identity keys:** generated in the browser and stored as a non-extractable `CryptoKey` in IndexedDB. Private keys are not uploaded to Supabase.
-- **Recipients:** each message is encrypted separately for each current conversation member, including the sender so their own messages can be decrypted on this device.
-- **Live drafts:** drafts are encrypted before being sent over Supabase Realtime Broadcast. Draft text is not written to the messages table.
-- **Access controls:** Supabase RLS limits message reads and writes, public-key access to shared participants, and private Realtime topics to conversation members.
-- **Key verification:** open the shield button in a conversation to see public-key fingerprints. Compare them with each participant through a separate trusted channel to help detect key substitution.
+1. Import `MayanKiz/RealTimeChat` into Vercel.
+2. Add the **Neon PostgreSQL** Marketplace integration.
+3. Add the **Vercel Blob** Marketplace integration.
+4. In Vercel project settings, add `AUTH_SECRET` as a long random value and set `AUTH_URL` to the production URL.
+5. Redeploy.
+6. Run `npm run db:migrate` once from a trusted environment with `DATABASE_URL`, or execute `db/migrations/001_initial.sql` in the Neon SQL editor.
 
-## Setup
+Required variables are documented in `.env.example`. Never put `DATABASE_URL`, `AUTH_SECRET`, or `BLOB_READ_WRITE_TOKEN` in a `NEXT_PUBLIC_*` variable.
 
-1. Create a Supabase project.
-2. In the Supabase SQL Editor, run `supabase/schema.sql`.
-3. In Supabase Authentication settings, enable Email OTP / magic links and configure allowed redirect URLs for local and deployed environments.
-4. In Supabase Project Settings → API, copy the Project URL and publishable/anon key.
-5. Create a local `.env.local` file:
+## Security model
 
-   ```env
-   NEXT_PUBLIC_SUPABASE_URL=https://YOUR_PROJECT.supabase.co
-   NEXT_PUBLIC_SUPABASE_ANON_KEY=YOUR_SUPABASE_PUBLISHABLE_OR_ANON_KEY
-   ```
+- Passwords are salted and hashed with Node `scrypt`; sessions are random, hashed server-side, HTTP-only, SameSite cookies.
+- The browser creates a non-extractable ECDH P-256 private key in IndexedDB. Only the public key is stored in Neon.
+- Messages are encrypted per recipient with ECDH P-256, HKDF-SHA-256, and AES-256-GCM before persistence.
+- The server stores ciphertext envelopes and never receives plaintext message content.
+- The UI verifies sender public keys and shows fingerprints for out-of-band comparison.
+- Messages use cursor-based polling because Vercel Functions do not provide a persistent WebSocket server.
+- Attachment uploads require authentication and room membership; callers must upload `application/octet-stream` ciphertext and the metadata stores an encrypted file key.
 
-6. Install dependencies and run:
+## Safe legacy migration
 
-   ```bash
-   npm install
-   npm run dev
-   ```
+The old Supabase data is not copied or deleted automatically. See `scripts/legacy-migration.md`. Preserve old encrypted envelopes only after backing up the original database and mapping legacy user IDs. Existing encrypted messages remain readable only on devices retaining the original IndexedDB private key. If legacy plaintext rows exist, stop and make an explicit archival/deletion decision; never copy them into the new encrypted table.
 
-7. Open http://localhost:3000 over localhost or HTTPS, sign in with a magic link, create a room, and share its invite ID with the intended participant. Each participant must sign in and open the room to publish an encryption public key before encrypted messaging works.
-
-## Existing plaintext database migration
-
-If you ran an earlier version that stored messages in `messages.body`, the schema refuses to complete while legacy plaintext rows exist. This is intentional: old messages cannot be made end-to-end encrypted by changing the database schema alone.
-
-1. Export any legacy messages you need to keep.
-2. If you are ready to discard all legacy plaintext messages, run this in the Supabase SQL Editor:
-
-   ```sql
-   delete from public.messages;
-   ```
-
-3. Rerun `supabase/schema.sql`. It will remove the old plaintext `body` column. New messages are stored only in `encrypted_payload`.
-
-Do not run the delete command unless you have decided to permanently remove the old messages.
-
-## Important limitations
-
-- Private keys are device-local. Clearing browser storage or moving to a different browser/device can make existing messages unreadable. There is no encrypted backup or secure key-transfer flow yet. Do not clear site data if you need to keep access to old messages.
-- A key fingerprint should be compared with the other participant over a separate trusted channel. Until participants verify fingerprints, a malicious service controlling the key directory could attempt public-key substitution.
-- Browser malware, compromised devices, malicious extensions, or an XSS vulnerability can expose plaintext after decryption. E2EE does not protect a compromised endpoint.
-- The room ID currently acts as an invite token. Only share it with intended participants. The join flow needs stronger invitation/approval controls before sensitive production use.
-- This is an initial E2EE implementation, not a third-party-audited secure messenger. Perform independent security review and two-account testing before relying on it for sensitive conversations.
-
-## Deploy
-
-Deploy as a standard Next.js application on Vercel. Set both environment variables in project settings and redeploy. Use HTTPS in production because Web Crypto and authentication redirects require a secure context.
+This project is not formally audited. Device compromise, XSS, malicious extensions, key substitution before fingerprint verification, and device loss remain important risks.

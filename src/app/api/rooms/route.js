@@ -1,0 +1,4 @@
+import { requireUser, jsonError } from "../../../lib/auth";
+import { db } from "../../../lib/db";
+export async function GET(){try{const u=await requireUser();const rows=await db()`select c.id,c.title,c.created_at from conversations c join conversation_members m on m.conversation_id=c.id where m.user_id=${u.id} order by c.created_at desc`;return Response.json({rooms:rows});}catch(e){return jsonError(e);}}
+export async function POST(request){try{const u=await requireUser();const {title}=await request.json();const clean=String(title||"").trim();if(clean.length<1||clean.length>60)throw new Error("Room name must be between 1 and 60 characters.");const rows=await db()`insert into conversations(title,created_by) values(${clean},${u.id}) returning id,title,created_at`;const room=rows[0];await db()`insert into conversation_members(conversation_id,user_id,role) values(${room.id},${u.id},'owner')`;return Response.json({room},{status:201});}catch(e){return jsonError(e);}}
