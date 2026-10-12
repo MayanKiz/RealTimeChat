@@ -134,6 +134,7 @@ grant execute on function public.join_conversation(uuid) to authenticated;
 grant select on public.conversations, public.conversation_members, public.messages, public.user_keys to authenticated;
 grant insert on public.messages to authenticated;
 grant insert on public.user_keys to authenticated;
+revoke update on public.user_keys from authenticated;
 
 -- Private Realtime Broadcast topics use chat:<conversation UUID>.
 alter table realtime.messages enable row level security;
