@@ -10,6 +10,8 @@ for (const file of (await fs.readdir(dir)).filter((x)=>x.endsWith(".sql")).sort(
   const [{count}] = await sql`select count(*)::int as count from schema_migrations where version=${file}`;
   if (count) continue;
   const content = await fs.readFile(path.join(dir,file), "utf8");
-  await sql.transaction([sql.query(content), sql`insert into schema_migrations(version) values(${file})`]);
+  const statements = content.split(";").map((statement) => statement.trim()).filter(Boolean);
+  for (const statement of statements) await sql.query(statement);
+  await sql`insert into schema_migrations(version) values(${file})`;
   console.log(`Applied ${file}`);
 }
