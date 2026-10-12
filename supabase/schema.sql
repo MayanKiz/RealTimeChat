@@ -1,4 +1,4 @@
--- Run this SQL in Supabase SQL Editor before using the chat.
+-- RealTimeChat E2EE schema. Run once in Supabase SQL Editor.
 create extension if not exists pgcrypto;
 
 create table if not exists public.conversations (
@@ -15,27 +15,30 @@ create table if not exists public.conversation_members (
   primary key (conversation_id, user_id)
 );
 
+-- Message bodies are ciphertext envelopes only. No plaintext body column is stored.
 create table if not exists public.messages (
   id uuid primary key default gen_random_uuid(),
   conversation_id uuid not null references public.conversations(id) on delete cascade,
   user_id uuid not null references auth.users(id) on delete cascade,
-  body text not null check (char_length(body) between 1 and 4000),
+  encrypted_payload jsonb not null,
   created_at timestamptz not null default now()
 );
-
 create index if not exists messages_room_created_idx on public.messages(conversation_id, created_at);
+
+-- Public ECDH identity keys. Private keys stay on each user's device in IndexedDB.
+create table if not exists public.user_keys (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  public_key jsonb not null,
+  updated_at timestamptz not null default now()
+);
 
 alter table public.conversations enable row level security;
 alter table public.conversation_members enable row level security;
 alter table public.messages enable row level security;
+alter table public.user_keys enable row level security;
 
--- SECURITY DEFINER avoids recursive RLS evaluation when policies check membership.
 create or replace function public.is_conversation_member(p_conversation_id uuid)
-returns boolean
-language sql
-stable
-security definer
-set search_path = ''
+returns boolean language sql stable security definer set search_path = ''
 as $$
   select exists (
     select 1 from public.conversation_members cm
@@ -44,6 +47,18 @@ as $$
 $$;
 revoke all on function public.is_conversation_member(uuid) from public;
 grant execute on function public.is_conversation_member(uuid) to authenticated;
+
+create or replace function public.shares_conversation_with(p_user_id uuid)
+returns boolean language sql stable security definer set search_path = ''
+as $$
+  select exists (
+    select 1 from public.conversation_members mine
+    join public.conversation_members theirs on theirs.conversation_id = mine.conversation_id
+    where mine.user_id = auth.uid() and theirs.user_id = p_user_id
+  );
+$$;
+revoke all on function public.shares_conversation_with(uuid) from public;
+grant execute on function public.shares_conversation_with(uuid) to authenticated;
 
 drop policy if exists "members can view their conversations" on public.conversations;
 create policy "members can view their conversations" on public.conversations
@@ -57,17 +72,26 @@ drop policy if exists "members can read room messages" on public.messages;
 create policy "members can read room messages" on public.messages
 for select to authenticated using (public.is_conversation_member(conversation_id));
 
-drop policy if exists "members can send room messages" on public.messages;
-create policy "members can send room messages" on public.messages
+drop policy if exists "members can send encrypted room messages" on public.messages;
+create policy "members can send encrypted room messages" on public.messages
 for insert to authenticated with check (
   user_id = auth.uid() and public.is_conversation_member(conversation_id)
 );
 
+drop policy if exists "users can read shared participants public keys" on public.user_keys;
+create policy "users can read shared participants public keys" on public.user_keys
+for select to authenticated using (public.shares_conversation_with(user_id));
+
+drop policy if exists "users can publish own public key" on public.user_keys;
+create policy "users can publish own public key" on public.user_keys
+for insert to authenticated with check (user_id = auth.uid());
+
+drop policy if exists "users can update own public key" on public.user_keys;
+create policy "users can update own public key" on public.user_keys
+for update to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
+
 create or replace function public.create_conversation(p_title text)
-returns uuid
-language plpgsql
-security definer
-set search_path = ''
+returns uuid language plpgsql security definer set search_path = ''
 as $$
 declare new_id uuid;
 begin
@@ -82,10 +106,7 @@ end;
 $$;
 
 create or replace function public.join_conversation(p_conversation_id uuid)
-returns uuid
-language plpgsql
-security definer
-set search_path = ''
+returns uuid language plpgsql security definer set search_path = ''
 as $$
 begin
   if auth.uid() is null then raise exception 'You must be signed in'; end if;
@@ -102,28 +123,18 @@ revoke all on function public.create_conversation(text) from public;
 revoke all on function public.join_conversation(uuid) from public;
 grant execute on function public.create_conversation(text) to authenticated;
 grant execute on function public.join_conversation(uuid) to authenticated;
-grant select on public.conversations, public.conversation_members, public.messages to authenticated;
+grant select on public.conversations, public.conversation_members, public.messages, public.user_keys to authenticated;
 grant insert on public.messages to authenticated;
+grant insert, update on public.user_keys to authenticated;
 
--- Private Broadcast topics use the format chat:<conversation UUID>.
--- Draft events are ephemeral Realtime messages, never rows in public.messages.
+-- Private Realtime Broadcast topics use chat:<conversation UUID>.
 alter table realtime.messages enable row level security;
 drop policy if exists "conversation members can receive private chat events" on realtime.messages;
 create policy "conversation members can receive private chat events"
 on realtime.messages for select to authenticated
 using (
-  case when realtime.topic() ~ '^chat:[0-9a-fA-F-]{36}
-);
-drop policy if exists "conversation members can send private chat events" on realtime.messages;
-create policy "conversation members can send private chat events"
-on realtime.messages for insert to authenticated
-with check (
-  realtime.topic() like 'chat:%'
-  and public.is_conversation_member(split_part(realtime.topic(), ':', 2)::uuid)
-);
-
--- In Supabase Dashboard, enable Realtime for public.messages if it is not already enabled.
-
+  case
+    when realtime.topic() ~ '^chat:[0-9a-fA-F-]{36}$'
     then public.is_conversation_member(split_part(realtime.topic(), ':', 2)::uuid)
     else false
   end
@@ -132,14 +143,11 @@ drop policy if exists "conversation members can send private chat events" on rea
 create policy "conversation members can send private chat events"
 on realtime.messages for insert to authenticated
 with check (
-  case when realtime.topic() ~ '^chat:[0-9a-fA-F-]{36}
-);
-
--- In Supabase Dashboard, enable Realtime for public.messages if it is not already enabled.
-
+  case
+    when realtime.topic() ~ '^chat:[0-9a-fA-F-]{36}$'
     then public.is_conversation_member(split_part(realtime.topic(), ':', 2)::uuid)
     else false
   end
 );
 
--- In Supabase Dashboard, enable Realtime for public.messages if it is not already enabled.
+-- In Supabase Dashboard, enable Realtime for public.messages if needed.
