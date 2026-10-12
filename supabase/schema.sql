@@ -29,31 +29,38 @@ alter table public.conversations enable row level security;
 alter table public.conversation_members enable row level security;
 alter table public.messages enable row level security;
 
+-- SECURITY DEFINER avoids recursive RLS evaluation when policies check membership.
+create or replace function public.is_conversation_member(p_conversation_id uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select exists (
+    select 1 from public.conversation_members cm
+    where cm.conversation_id = p_conversation_id and cm.user_id = auth.uid()
+  );
+$$;
+revoke all on function public.is_conversation_member(uuid) from public;
+grant execute on function public.is_conversation_member(uuid) to authenticated;
+
 drop policy if exists "members can view their conversations" on public.conversations;
 create policy "members can view their conversations" on public.conversations
-for select to authenticated using (
-  exists (select 1 from public.conversation_members cm where cm.conversation_id = conversations.id and cm.user_id = auth.uid())
-);
+for select to authenticated using (public.is_conversation_member(id));
 
 drop policy if exists "members can view room membership" on public.conversation_members;
 create policy "members can view room membership" on public.conversation_members
-for select to authenticated using (
-  exists (select 1 from public.conversation_members own where own.conversation_id = conversation_members.conversation_id and own.user_id = auth.uid())
-);
+for select to authenticated using (public.is_conversation_member(conversation_id));
 
 drop policy if exists "members can read room messages" on public.messages;
 create policy "members can read room messages" on public.messages
-for select to authenticated using (
-  exists (select 1 from public.conversation_members cm where cm.conversation_id = messages.conversation_id and cm.user_id = auth.uid())
-);
+for select to authenticated using (public.is_conversation_member(conversation_id));
 
 drop policy if exists "members can send room messages" on public.messages;
 create policy "members can send room messages" on public.messages
 for insert to authenticated with check (
-  user_id = auth.uid() and exists (
-    select 1 from public.conversation_members cm
-    where cm.conversation_id = messages.conversation_id and cm.user_id = auth.uid()
-  )
+  user_id = auth.uid() and public.is_conversation_member(conversation_id)
 );
 
 create or replace function public.create_conversation(p_title text)
@@ -98,30 +105,22 @@ grant execute on function public.join_conversation(uuid) to authenticated;
 grant select on public.conversations, public.conversation_members, public.messages to authenticated;
 grant insert on public.messages to authenticated;
 
--- Enable private Broadcast authorization for topics formatted as chat:<conversation UUID>.
--- Realtime draft events are ephemeral Broadcast messages, never rows in public.messages.
+-- Private Broadcast topics use the format chat:<conversation UUID>.
+-- Draft events are ephemeral Realtime messages, never rows in public.messages.
 alter table realtime.messages enable row level security;
 drop policy if exists "conversation members can receive private chat events" on realtime.messages;
 create policy "conversation members can receive private chat events"
 on realtime.messages for select to authenticated
 using (
   realtime.topic() like 'chat:%'
-  and exists (
-    select 1 from public.conversation_members cm
-    where cm.conversation_id::text = split_part(realtime.topic(), ':', 2)
-      and cm.user_id = auth.uid()
-  )
+  and public.is_conversation_member(split_part(realtime.topic(), ':', 2)::uuid)
 );
 drop policy if exists "conversation members can send private chat events" on realtime.messages;
 create policy "conversation members can send private chat events"
 on realtime.messages for insert to authenticated
 with check (
   realtime.topic() like 'chat:%'
-  and exists (
-    select 1 from public.conversation_members cm
-    where cm.conversation_id::text = split_part(realtime.topic(), ':', 2)
-      and cm.user_id = auth.uid()
-  )
+  and public.is_conversation_member(split_part(realtime.topic(), ':', 2)::uuid)
 );
 
--- Enable Realtime database changes for the messages table in the Supabase dashboard if not already enabled.
+-- In Supabase Dashboard, enable Realtime for public.messages if it is not already enabled.
