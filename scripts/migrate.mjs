@@ -1,8 +1,9 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { neon } from "@neondatabase/serverless";
-if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is required");
-const sql = neon(process.env.DATABASE_URL);
+const connectionString = process.env.DATABASE_URL || process.env.STORAGE_DATABASE_URL;
+if (!connectionString) throw new Error("DATABASE_URL is required");
+const sql = neon(connectionString);
 await sql`create table if not exists schema_migrations (version text primary key, applied_at timestamptz not null default now())`;
 const dir = path.resolve("db/migrations");
 for (const file of (await fs.readdir(dir)).filter((x)=>x.endsWith(".sql")).sort()) {
