@@ -1,6 +1,6 @@
 # RealTimeChat
 
-A Next.js chat app with the NAAZZ-V2-inspired dark atmosphere, cyan/violet ambient glow, glass panels, and **optional live draft sharing**.
+A Next.js chat app , cyan/violet ambient glow, glass panels, and **optional live draft sharing**.
 
 ## Features
 
