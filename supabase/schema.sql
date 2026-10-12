@@ -25,7 +25,8 @@ create table if not exists public.messages (
 );
 create index if not exists messages_room_created_idx on public.messages(conversation_id, created_at);
 
--- Compatibility for a database that ran the earlier plaintext-message schema.
+-- Compatibility for the earlier plaintext-message schema. Never keep legacy plaintext
+-- rows in an E2EE deployment. If any exist, this intentionally stops the migration.
 alter table public.messages add column if not exists encrypted_payload jsonb;
 do $migration$
 begin
@@ -33,7 +34,10 @@ begin
     select 1 from information_schema.columns
     where table_schema = 'public' and table_name = 'messages' and column_name = 'body'
   ) then
-    execute 'alter table public.messages alter column body drop not null';
+    if exists (select 1 from public.messages where body is not null) then
+      raise exception 'Legacy plaintext messages exist. Export anything you need, delete the old messages, then rerun this schema.';
+    end if;
+    alter table public.messages drop column body;
   end if;
 end
 $migration$;
@@ -76,10 +80,13 @@ drop policy if exists "members can read room messages" on public.messages;
 create policy "members can read room messages" on public.messages
 for select to authenticated using (public.is_conversation_member(conversation_id));
 
+drop policy if exists "members can send room messages" on public.messages;
 drop policy if exists "members can send encrypted room messages" on public.messages;
 create policy "members can send encrypted room messages" on public.messages
 for insert to authenticated with check (
-  user_id = auth.uid() and public.is_conversation_member(conversation_id)
+  user_id = auth.uid()
+  and encrypted_payload is not null
+  and public.is_conversation_member(conversation_id)
 );
 
 drop policy if exists "users can read shared participants public keys" on public.user_keys;
