@@ -36,13 +36,18 @@ A Next.js chat app using Supabase with NAAZZ-V2-inspired dark styling and browse
 
 ## Existing plaintext database migration
 
-If you ran an earlier version of this project that stored `messages.body` in plaintext, the schema adds `encrypted_payload` and makes the old `body` column nullable. **Existing rows are not magically encrypted by this migration.** After exporting anything you need to keep, remove legacy plaintext rows before treating the deployment as E2EE:
+If you ran an earlier version that stored messages in `messages.body`, the schema refuses to complete while legacy plaintext rows exist. This is intentional: old messages cannot be made end-to-end encrypted by changing the database schema alone.
 
-```sql
-delete from public.messages where encrypted_payload is null;
-```
+1. Export any legacy messages you need to keep.
+2. If you are ready to discard all legacy plaintext messages, run this in the Supabase SQL Editor:
 
-Run this only after confirming that you do not need those legacy messages. New messages are stored in `encrypted_payload` only.
+   ```sql
+   delete from public.messages;
+   ```
+
+3. Rerun `supabase/schema.sql`. It will remove the old plaintext `body` column. New messages are stored only in `encrypted_payload`.
+
+Do not run the delete command unless you have decided to permanently remove the old messages.
 
 ## Important limitations
 
