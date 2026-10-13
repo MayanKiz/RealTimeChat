@@ -1,26 +1,105 @@
 "use client";
-import {useCallback,useEffect,useRef,useState} from "react";
-import {createLocalIdentity,decryptForRecipient,encryptForRecipients,fingerprintPublicKey,loadLocalIdentity} from "../lib/e2ee";
-import {ArrowUpRight,Check,Copy,LogOut,MessageCircle,Plus,Send,ShieldCheck, Sparkles,Users,X} from "lucide-react";
-const shortId=(v="")=>v.length>15?v.slice(0,8)+"…"+v.slice(-5):v; const time=v=>new Date(v).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
-async function api(url,options={}){const r=await fetch(url,{...options,headers:{"content-type":"application/json",...(options.headers||{})}});const data=await r.json().catch(()=>({}));if(!r.ok)throw new Error(data.error||"Request failed");return data;}
-export default function ChatPage(){
- const [user,setUser]=useState(null),[email,setEmail]=useState(""),[password,setPassword]=useState(""),[registerMode,setRegisterMode]=useState(false),[authBusy,setAuthBusy]=useState(false),[notice,setNotice]=useState("");
- const [rooms,setRooms]=useState([]),[roomId,setRoomId]=useState(""),[roomTitle,setRoomTitle]=useState(""),[joinId,setJoinId]=useState(""),[messages,setMessages]=useState([]),[draft,setDraft]=useState(""),[busy,setBusy]=useState(false),[identity,setIdentity]=useState(null),[roomCrypto,setRoomCrypto]=useState(null),[keyStatus,setKeyStatus]=useState("loading"),[fingerprints,setFingerprints]=useState({}),[showKeyInfo,setShowKeyInfo]=useState(false),[copyDone,setCopyDone]=useState(false);
- const roomRef=useRef(""); const cursorRef=useRef(null); const bottomRef=useRef(null); const userId=user?.id;
- const loadRooms=useCallback(async()=>{if(!userId)return;const d=await api("/api/rooms");setRooms(d.rooms);if(!roomRef.current&&d.rooms[0]){roomRef.current=d.rooms[0].id;setRoomId(d.rooms[0].id);}},[userId]);
- useEffect(()=>{api("/api/auth/session").then(d=>setUser(d.user)).catch(()=>{});},[]);
- useEffect(()=>{if(userId)loadRooms();else{setRooms([]);setRoomId("");roomRef.current="";}},[userId,loadRooms]);
- useEffect(()=>{if(!userId)return;let stop=false;setKeyStatus("loading");(async()=>{const local=await loadLocalIdentity(userId);const remote=(await api("/api/keys")).keys.find(k=>k.user_id===userId)?.public_key;let current=local;if(local&&remote&&JSON.stringify(local.publicKeyJwk)!==JSON.stringify(remote))throw Error("This device key does not match the account key. Restore the original device key.");if(!local){if(remote)throw Error("This account has a key from another device. Secure key transfer is required.");current=await createLocalIdentity(userId);await api("/api/keys",{method:"POST",body:JSON.stringify({publicKey:current.publicKeyJwk})});}if(!stop){setIdentity(current);setKeyStatus("ready");}})().catch(e=>{if(!stop){setKeyStatus("error");setNotice("Encryption setup failed: "+e.message);}});return()=>{stop=true;};},[userId]);
- useEffect(()=>{if(!userId||!roomId||!identity||keyStatus!=="ready")return;let stop=false;(async()=>{try{const d=await api("/api/keys?roomId="+roomId);const ids=d.keys.map(k=>k.user_id),keys=Object.fromEntries(d.keys.map(k=>[k.user_id,k.public_key]));if(!ids.includes(userId)||ids.some(id=>!keys[id]))throw Error("All participants must open this room once to publish an encryption key.");if(!stop){setRoomCrypto({roomId,memberIds:ids,publicKeys:keys});const fp=await Promise.all(Object.entries(keys).map(async([id,k])=>[id,await fingerprintPublicKey(k)]));setFingerprints(Object.fromEntries(fp));}}catch(e){if(!stop){setRoomCrypto(null);setNotice(e.message);}}})();return()=>{stop=true;};},[userId,roomId,identity,keyStatus]);
- useEffect(()=>{if(!userId||!roomCrypto)return;let stop=false;cursorRef.current=null;setMessages([]);const poll=async()=>{try{const q=cursorRef.current?`?cursor=${cursorRef.current}`:"";const d=await api(`/api/rooms/${roomId}/messages${q}`);const decoded=await Promise.all(d.messages.map(async row=>{try{return {...row,body:await decryptForRecipient({envelope:row.encrypted_payload,roomId,senderId:row.user_id,recipientId:userId,privateKey:identity.privateKey,expectedSenderPublicKey:roomCrypto.publicKeys[row.user_id]})};}catch{return {...row,body:"Unable to decrypt this message on this device.",decryptError:true};}}));if(!stop){setMessages(c=>{const seen=new Set(c.map(x=>x.id));return [...c,...decoded.filter(x=>!seen.has(x.id))];});cursorRef.current=d.nextCursor||cursorRef.current;}}catch(e){if(!stop)setNotice(e.message);}};poll();const timer=setInterval(poll,2500);return()=>{stop=true;clearInterval(timer);};},[userId,roomId,identity,roomCrypto]);
- useEffect(()=>bottomRef.current?.scrollIntoView({behavior:"smooth"}),[messages.length]);
- const signIn=async e=>{e.preventDefault();setAuthBusy(true);setNotice("");try{const d=await api(`/api/auth/${registerMode?"register":"login"}`,{method:"POST",body:JSON.stringify({email,password})});setUser(d.user);setPassword("");}catch(x){setNotice(x.message);}finally{setAuthBusy(false);}};
- const signOut=async()=>{await api("/api/auth/logout",{method:"POST"});setUser(null);setIdentity(null);};
- const createRoom=async e=>{e.preventDefault();if(!roomTitle.trim())return;setBusy(true);try{const d=await api("/api/rooms",{method:"POST",body:JSON.stringify({title:roomTitle})});setRoomTitle("");await loadRooms();setRoomId(d.room.id);roomRef.current=d.room.id;}catch(x){setNotice(x.message);}finally{setBusy(false);}};
- const joinRoom=async e=>{e.preventDefault();setBusy(true);try{await api(`/api/rooms/${joinId.trim()}/join`,{method:"POST"});await loadRooms();setRoomId(joinId.trim());roomRef.current=joinId.trim();setJoinId("");}catch(x){setNotice(x.message);}finally{setBusy(false);}};
- const sendMessage=async e=>{e.preventDefault();const body=draft.trim();if(!body||busy||!roomCrypto)return;setBusy(true);try{const encryptedPayload=await encryptForRecipients({text:body,roomId,senderId:userId,recipientIds:roomCrypto.memberIds,privateKey:identity.privateKey,publicKeyJwk:identity.publicKeyJwk,publicKeys:roomCrypto.publicKeys});const d=await api(`/api/rooms/${roomId}/messages`,{method:"POST",body:JSON.stringify({encryptedPayload})});setMessages(c=>[...c,{...d.message,body}]);setDraft("");cursorRef.current=d.message.id;}catch(x){setNotice(x.message);}finally{setBusy(false);}};
- if(!user)return <main className="app-shell"><Background/><section className="auth-card"><div className="brand-mark"><MessageCircle size={23}/></div><p className="eyebrow">NAAZZ / PRIVATE CHAT</p><h1>Words, before<br/><span>they're sent.</span></h1><p className="muted">{registerMode?"Create an account with a strong password.":"Sign in to your encrypted conversations."}</p><form onSubmit={signIn} className="auth-form"><label htmlFor="email">Email</label><input id="email" type="email" autoComplete="email" value={email} onChange={e=>setEmail(e.target.value)} required/><label htmlFor="password">Password</label><input id="password" type="password" minLength={10} autoComplete={registerMode?"new-password":"current-password"} value={password} onChange={e=>setPassword(e.target.value)} required/><button className="primary-button" disabled={authBusy}>{authBusy?(registerMode?"Creating…":"Signing in…"):(registerMode?"Create account":"Sign in")} <ArrowUpRight size={16}/></button></form><button className="text-button" onClick={()=>setRegisterMode(v=>!v)}>{registerMode?"Already have an account? Sign in":"Need an account? Create one"}</button>{notice&&<p className="notice">{notice}</p>}<p className="tiny-note"><ShieldCheck size={14}/> Private keys stay in this browser.</p></section></main>;
- return <main className="app-shell"><Background/><div className="chat-layout"><aside className="sidebar glass-panel"><div className="sidebar-head"><div className="brand-mark small"><MessageCircle size={19}/></div><div><p className="eyebrow">NAAZZ / CHAT</p><h2>Conversations</h2></div><button className="icon-button logout" title="Sign out" onClick={signOut}><LogOut size={17}/></button></div><form className="create-room" onSubmit={createRoom}><input aria-label="New room name" placeholder="Name a new room…" value={roomTitle} onChange={e=>setRoomTitle(e.target.value)} maxLength={60}/><button className="icon-button accent" title="Create room" disabled={busy||!roomTitle.trim()}><Plus size={18}/></button></form><form className="join-room" onSubmit={joinRoom}><input aria-label="Invite room ID" placeholder="Paste room invite ID…" value={joinId} onChange={e=>setJoinId(e.target.value)}/><button className="text-button" disabled={busy||!joinId.trim()}>Join</button></form><div className="room-list">{rooms.map(r=><button key={r.id} className={`room-item ${r.id===roomId?"active":""}`} onClick={()=>{setRoomId(r.id);roomRef.current=r.id;setRoomCrypto(null);}}><span className="room-avatar"><Users size={16}/></span><span className="room-copy"><strong>{r.title}</strong><small>{shortId(r.id)}</small></span>{r.id===roomId&&<span className="online-dot"/>}</button>)}{!rooms.length&&<p className="empty-side">Create a room, then share its invite ID with someone you trust.</p>}</div><div className="profile-row"><div className="profile-avatar">{user.email.slice(0,1).toUpperCase()}</div><div className="profile-copy"><strong>{user.email}</strong><small>Authenticated session</small></div></div></aside><section className="conversation glass-panel"><header className="conversation-head"><div className="room-avatar large"><Users size={18}/></div><div className="conversation-title"><h2>{rooms.find(r=>r.id===roomId)?.title||"Choose a conversation"}</h2><p><span className="online-dot"/> <ShieldCheck size={12}/> {roomCrypto?"End-to-end encrypted":keyStatus==="error"?"Encryption needs attention":"Preparing encryption keys"}</p></div><div className="head-actions"><button className="icon-button" title="Encryption key fingerprints" disabled={!roomCrypto} onClick={()=>setShowKeyInfo(v=>!v)}><ShieldCheck size={16}/></button><button className="icon-button" title="Copy invite ID" disabled={!roomId} onClick={()=>{navigator.clipboard?.writeText(roomId);setCopyDone(true);setTimeout(()=>setCopyDone(false),1400);}}>{copyDone?<Check size={16}/>:<Copy size={16}/>}</button></div></header>{showKeyInfo&&roomCrypto&&<div className="key-info-panel"><div className="key-info-title"><ShieldCheck size={16}/> End-to-end encryption keys</div><p>Compare fingerprints through a separate trusted channel.</p>{Object.entries(fingerprints).map(([id,fp])=><div className="fingerprint-row" key={id}><strong>{id===userId?"You":shortId(id)}</strong><code>{fp}</code></div>)}</div>}<div className="message-feed">{!roomId?<div className="welcome-state"><div className="welcome-orb"><Sparkles size={24}/></div><h3>A room for your words.</h3><p>Create a room or join one using an invite ID.</p></div>:!messages.length?<div className="welcome-state"><div className="welcome-orb"><MessageCircle size={24}/></div><h3>Start something real.</h3><p>Messages are saved as ciphertext and decrypted locally.</p></div>:null}{messages.map(m=><div key={m.id} className={`message-row ${m.user_id===userId?"mine":"theirs"}`}><div className={`message-bubble ${m.decryptError?"decrypt-error":""}`}><p>{m.body}</p><span><ShieldCheck size={11}/> {m.user_id===userId?"You":shortId(m.user_id)} · {time(m.created_at)}</span></div></div>)}<div ref={bottomRef}/></div>{notice&&<div className="notice-bar" role="status">{notice}<button onClick={()=>setNotice("")} aria-label="Dismiss"><X size={14}/></button></div>}<form className="composer" onSubmit={sendMessage}><div className="composer-inner"><textarea aria-label="Write a message" placeholder={roomId?"Write something…":"Choose a room first"} value={draft} onChange={e=>setDraft(e.target.value)} disabled={!roomId} rows={1} maxLength={4000} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();sendMessage(e);}}}/><button className="send-button" type="submit" disabled={!draft.trim()||busy||!roomCrypto} aria-label="Send message"><Send size={17}/></button></div><div className="composer-footer"><span>Cursor polling · Enter to send · Shift+Enter for newline</span><span>{draft.length}/4000</span></div></form></section></div></main>;
+import { useCallback, useEffect, useRef, useState } from "react";
+import { ArrowUpRight, Check, Copy, LogOut, MessageCircle, Search, Send, Sparkles, UserRound, X } from "lucide-react";
+
+async function api(url, options = {}) {
+  const response = await fetch(url, { ...options, headers: { "content-type": "application/json", ...(options.headers || {}) } });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || "Something went wrong.");
+  return data;
 }
-function Background(){return <div className="ambient-background" aria-hidden="true"><div className="ambient-photo"/><div className="ambient-wash"/><div className="ambient-glow glow-cyan"/><div className="ambient-glow glow-violet"/><div className="ambient-grid"/></div>}
+const time = (value) => new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+export default function ChatPage() {
+  const [user, setUser] = useState(null);
+  const [name, setName] = useState("");
+  const [code, setCode] = useState("");
+  const [contactCode, setContactCode] = useState("");
+  const [chats, setChats] = useState([]);
+  const [chatId, setChatId] = useState("");
+  const [messages, setMessages] = useState([]);
+  const [draft, setDraft] = useState("");
+  const [notice, setNotice] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [copyDone, setCopyDone] = useState(false);
+  const cursorRef = useRef(null);
+  const bottomRef = useRef(null);
+  const userId = user?.id;
+  const activeChat = chats.find((chat) => chat.id === chatId);
+
+  const enterFullscreen = () => {
+    if (document.fullscreenElement) return;
+    document.documentElement.requestFullscreen?.().catch(() => {});
+  };
+
+  const loadChats = useCallback(async () => {
+    if (!userId) return;
+    const data = await api("/api/chats");
+    setChats(data.chats);
+    if (!chatId && data.chats[0]) setChatId(data.chats[0].id);
+  }, [userId, chatId]);
+
+  useEffect(() => { api("/api/auth/session").then((data) => setUser(data.user)).catch(() => {}); }, []);
+  useEffect(() => { if (userId) loadChats(); }, [userId, loadChats]);
+
+  useEffect(() => {
+    if (!userId || !chatId) { setMessages([]); return; }
+    let stopped = false;
+    cursorRef.current = null;
+    setMessages([]);
+    const poll = async () => {
+      try {
+        const query = cursorRef.current ? `?cursor=${cursorRef.current}` : "";
+        const data = await api(`/api/chats/${chatId}/messages${query}`);
+        if (!stopped) {
+          setMessages((current) => {
+            const seen = new Set(current.map((item) => item.id));
+            return [...current, ...data.messages.filter((item) => !seen.has(item.id))];
+          });
+          cursorRef.current = data.nextCursor || cursorRef.current;
+        }
+      } catch (error) { if (!stopped) setNotice(error.message); }
+    };
+    poll();
+    const timer = setInterval(poll, 2200);
+    return () => { stopped = true; clearInterval(timer); };
+  }, [userId, chatId]);
+
+  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages.length]);
+
+  const enter = async (event) => {
+    event.preventDefault();
+    setBusy(true); setNotice(""); enterFullscreen();
+    try { const data = await api("/api/auth/code", { method: "POST", body: JSON.stringify({ name, code }) }); setUser(data.user); }
+    catch (error) { setNotice(error.message); }
+    finally { setBusy(false); }
+  };
+
+  const startChat = async (event) => {
+    event.preventDefault();
+    if (!/^\d{6}$/.test(contactCode)) return setNotice("Enter a 6-digit code.");
+    setBusy(true); setNotice("");
+    try { const data = await api("/api/chats", { method: "POST", body: JSON.stringify({ code: contactCode }) }); setContactCode(""); await loadChats(); setChatId(data.chat.id); }
+    catch (error) { setNotice(error.message); }
+    finally { setBusy(false); }
+  };
+
+  const sendMessage = async (event) => {
+    event.preventDefault();
+    const body = draft.trim();
+    if (!body || !chatId || busy) return;
+    setBusy(true);
+    try { const data = await api(`/api/chats/${chatId}/messages`, { method: "POST", body: JSON.stringify({ body }) }); setMessages((current) => [...current, data.message]); setDraft(""); cursorRef.current = data.message.id; }
+    catch (error) { setNotice(error.message); }
+    finally { setBusy(false); }
+  };
+
+  const logout = async () => { await api("/api/auth/logout", { method: "POST" }); setUser(null); setChats([]); setChatId(""); };
+  const copyCode = () => { navigator.clipboard?.writeText(user?.contact_code || ""); setCopyDone(true); setTimeout(() => setCopyDone(false), 1400); };
+
+  if (!user) return <main className="liquid-app"><Ambient /><section className="entry-card glass-card" onPointerDown={enterFullscreen}><div className="logo-orb"><MessageCircle size={28} /></div><p className="kicker">NAAZZ / SIMPLE CHAT</p><h1>Talk without<br /><em>the noise.</em></h1><p className="entry-copy">Write your name and a six-digit code. That is all you need to enter.</p><form onSubmit={enter} className="entry-form"><label>Your name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Mayank" maxLength={40} required autoFocus /></label><label>Your 6-digit code<input inputMode="numeric" pattern="[0-9]{6}" value={code} onChange={(event) => setCode(event.target.value.replace(/\D/g, "").slice(0, 6))} placeholder="000000" maxLength={6} required /></label><button className="primary-button" disabled={busy}>{busy ? "Opening…" : "Enter chat"}<ArrowUpRight size={17} /></button></form>{notice && <Notice text={notice} clear={() => setNotice("")} />}<p className="quiet-note"><Sparkles size={14} /> First click opens fullscreen chat</p></section></main>;
+
+  return <main className="liquid-app"><Ambient /><div className="chat-shell glass-card"><aside className="chat-sidebar"><div className="sidebar-brand"><div className="mini-orb"><MessageCircle size={18} /></div><div><p className="kicker">NAAZZ / CHAT</p><strong>Messages</strong></div><button className="icon-button" onClick={logout} title="Sign out"><LogOut size={16} /></button></div><form className="new-chat" onSubmit={startChat}><input inputMode="numeric" value={contactCode} onChange={(event) => setContactCode(event.target.value.replace(/\D/g, "").slice(0, 6))} placeholder="Enter 6-digit code" maxLength={6} aria-label="Contact code" /><button type="submit" disabled={busy || contactCode.length !== 6} title="Start chat"><Search size={17} /></button></form><div className="your-code"><span>Your code</span><button onClick={copyCode}>{copyDone ? <Check size={14} /> : <Copy size={14} />} {user.contact_code}</button></div><div className="chat-list">{chats.map((chat) => <button key={chat.id} className={`chat-preview ${chat.id === chatId ? "selected" : ""}`} onClick={() => setChatId(chat.id)}><div className="contact-avatar">{(chat.contact_name || "?").slice(0, 1).toUpperCase()}</div><div><strong>{chat.contact_name || "Contact"}</strong><small>{chat.contact_code}</small></div><span className="status-dot" /></button>)}{!chats.length && <div className="empty-list"><UserRound size={21} /><span>Start a chat with<br />someone's 6-digit code.</span></div>}</div><div className="profile"><div className="contact-avatar">{(user.display_name || "?").slice(0, 1).toUpperCase()}</div><div><strong>{user.display_name}</strong><small>Available to chat</small></div></div></aside><section className="conversation"><header className="conversation-head">{activeChat ? <><div className="contact-avatar large">{(activeChat.contact_name || "?").slice(0, 1).toUpperCase()}</div><div><h2>{activeChat.contact_name}</h2><p><span className="status-dot" /> Code {activeChat.contact_code}</p></div></> : <div><h2>Choose a chat</h2><p>Use a six-digit code to connect</p></div>}</header><div className="message-feed">{!activeChat && <div className="welcome"><div className="welcome-orb"><Sparkles size={24} /></div><h3>Your space for real conversations.</h3><p>Enter a friend's six-digit code to begin.</p></div>}{activeChat && !messages.length && <div className="welcome"><div className="welcome-orb"><MessageCircle size={24} /></div><h3>Say hello to {activeChat.contact_name}.</h3><p>Your first message is waiting.</p></div>}{messages.map((message) => <div key={message.id} className={`message-row ${message.user_id === userId ? "mine" : "theirs"}`}><div className="message-bubble"><p>{message.body}</p><span>{message.user_id === userId ? "You" : activeChat?.contact_name} · {time(message.created_at)}</span></div></div>)}<div ref={bottomRef} /></div>{notice && <Notice text={notice} clear={() => setNotice("")} />}<form className="composer" onSubmit={sendMessage}><textarea value={draft} onChange={(event) => setDraft(event.target.value)} disabled={!activeChat} placeholder={activeChat ? "Write a message…" : "Choose a chat first"} rows={1} maxLength={4000} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); sendMessage(event); } }} /><button className="send-button" type="submit" disabled={!draft.trim() || !activeChat || busy}><Send size={18} /></button></form></section></div></main>;
+}
+function Notice({ text, clear }) { return <div className="notice-bar">{text}<button onClick={clear} aria-label="Dismiss"><X size={14} /></button></div>; }
+function Ambient() { return <div className="ambient" aria-hidden="true"><div className="ambient-shape shape-a" /><div className="ambient-shape shape-b" /><div className="ambient-shape shape-c" /><div className="ambient-grain" /></div>; }
